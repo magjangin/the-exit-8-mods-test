@@ -27,8 +27,8 @@ local ui = nil          -- { widget, accent, title, advice }
 local shown = { title = nil, advice = nil, color = nil }
 local retryTicks = 0
 local nameCounter = 0
-local fontSearched = false
 local hudFont = nil
+local hudFontName = nil -- nil: 아직 탐색 전, false: 맞는 폰트 없음, 문자열: 고른 폰트의 GetFullName()
 
 function Hud.Init(config)
     Config = config
@@ -56,11 +56,8 @@ local function Construct(classPath, outer, baseName)
     return obj
 end
 
--- 한글이 나오는 게임 폰트를 이름 키워드로 탐색 (없으면 엔진 기본 폰트 사용)
-local function FindHudFont()
-    if fontSearched then return hudFont end
-    fontSearched = true
-
+-- 한글이 나오는 게임 폰트를 이름 키워드로 탐색 (없으면 nil → 엔진 기본 폰트 사용)
+local function SearchHudFont()
     local fonts = {}
     for _, font in ipairs(FindAllOf("Font") or {}) do
         if font:IsValid() then
@@ -78,14 +75,53 @@ local function FindHudFont()
         local needle = hint:lower()
         for _, f in ipairs(fonts) do
             if f.name:lower():find(needle, 1, true) then
-                hudFont = f.obj
                 Util.Log("HUD font selected by hint '%s': %s", hint, f.name)
-                return hudFont
+                return f.obj
             end
         end
     end
     Util.Log("No font matched HUD_FontHints. Using engine default font.")
     return nil
+end
+
+local function IsFont(obj, fullName)
+    return Util.IsValid(obj) and obj:GetFullName() == fullName
+end
+
+-- 전에 고른 폰트를 경로로 다시 찾는다 (메모리에서 빠졌으면 디스크에서 다시 로드)
+local function ReloadFont(fullName)
+    local path = fullName:match("^%S+%s+(.+)$") -- "Font /Game/..." → "/Game/..."
+    if not path then return nil end
+
+    local font = StaticFindObject(path)
+    if not IsFont(font, fullName) then
+        local ok, loaded = pcall(LoadAsset, path)
+        font = ok and loaded or nil
+    end
+    return IsFont(font, fullName) and font or nil
+end
+
+-- 레벨 전환(플레이 데이터 삭제 등) 때 이전 HUD 가 사라지면 폰트도 GC 로 해제될 수 있다.
+-- 해제된 폰트를 새 HUD 에 넣으면 글자가 0 크기로 그려져 HUD 가 빈 작은 박스로 쪼그라들므로
+-- 캐시한 폰트가 아직 살아 있는지 매번 확인한다.
+local function GetHudFont()
+    if hudFontName == nil then
+        hudFont = SearchHudFont()
+        hudFontName = hudFont and hudFont:GetFullName() or false
+        return hudFont
+    end
+    if not hudFontName then return nil end
+    if IsFont(hudFont, hudFontName) then return hudFont end
+
+    hudFont = ReloadFont(hudFontName)
+    if hudFont then
+        Util.Log("HUD font was unloaded, reloaded: %s", hudFontName)
+    else
+        Util.Log("HUD font was unloaded and could not be reloaded: %s. Searching again.", hudFontName)
+        hudFont = SearchHudFont()
+        hudFontName = hudFont and hudFont:GetFullName() or false
+    end
+    return hudFont
 end
 
 local function MakeText(tree, baseName, fontSize, font)
@@ -109,7 +145,7 @@ local function Build()
     -- 월드/플레이어가 준비되기 전에는 AddToViewport 가 무시되므로 기다린다
     if not Util.IsValid(UEHelpers.GetPlayerController()) then return nil end
 
-    local font = FindHudFont()
+    local font = GetHudFont()
 
     local widget = Construct("/Script/UMG.UserWidget", gi, "HUD")
     local tree = Construct("/Script/UMG.WidgetTree", widget, "Tree")
